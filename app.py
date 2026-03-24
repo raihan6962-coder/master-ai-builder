@@ -15,7 +15,6 @@ st.markdown("""
 <style>
     .stChatFloatingInputContainer { padding-bottom: 20px; }
     .block-container { padding-top: 2rem; padding-bottom: 5rem; }
-    .small-btn { font-size: 10px !important; padding: 0px !important; }
 </style>
 """, unsafe_allow_html=True)
 
@@ -78,7 +77,6 @@ if "editing_index" not in st.session_state:
 if "pending_generation" not in st.session_state:
     st.session_state.pending_generation = False
 
-# Callbacks for Message Actions
 def delete_msg(index):
     st.session_state.messages.pop(index)
     save_chat(st.session_state.current_chat_id, st.session_state.chat_title, st.session_state.messages)
@@ -88,7 +86,6 @@ def set_edit(index):
 
 def submit_edit(index, new_text):
     st.session_state.messages[index]["content"] = new_text
-    # Truncate history after the edited message (like Claude/ChatGPT)
     st.session_state.messages = st.session_state.messages[:index+1]
     st.session_state.editing_index = None
     st.session_state.pending_generation = True
@@ -96,14 +93,13 @@ def submit_edit(index, new_text):
 
 def retry_last():
     if len(st.session_state.messages) > 0 and st.session_state.messages[-1]["role"] == "assistant":
-        st.session_state.messages.pop() # Remove last AI response
+        st.session_state.messages.pop()
     st.session_state.pending_generation = True
     save_chat(st.session_state.current_chat_id, st.session_state.chat_title, st.session_state.messages)
 
-# System Prompt
 SYSTEM_PROMPT = {
     "role": "system", 
-    "content": "You are an Elite AI Architect and Senior Python Developer. Help the user build highly complex, production-ready AI agents. Never break code. Provide complete, copy-pasteable Python scripts. Be proactive and smart."
+    "content": "You are an Elite AI Architect and Senior Python Developer. Help the user build highly complex, production-ready AI agents. Never break code. Provide complete, copy-pasteable Python scripts."
 }
 
 # ==========================================
@@ -137,7 +133,6 @@ with st.sidebar:
                 st.session_state.editing_index = None
                 st.rerun()
         with col2:
-            # Delete Chat Tab Button
             if st.button("🗑️", key=f"del_chat_{chat['id']}", help="Delete Chat"):
                 delete_chat_file(chat['id'])
                 if chat['id'] == st.session_state.current_chat_id:
@@ -176,12 +171,9 @@ if not active_api_key:
 
 client = Groq(api_key=active_api_key)
 
-# Display Chat Messages & Action Buttons
 for i, message in enumerate(st.session_state.messages):
     if message["role"] != "system":
         with st.chat_message(message["role"]):
-            
-            # If currently editing this message
             if st.session_state.editing_index == i:
                 new_text = st.text_area("Edit message:", value=message["content"], height=100)
                 col1, col2 = st.columns([1, 10])
@@ -194,13 +186,18 @@ for i, message in enumerate(st.session_state.messages):
                         st.session_state.editing_index = None
                         st.rerun()
             else:
-                # Normal Display
                 if "image_data" in message:
                     image_bytes = base64.b64decode(message["image_data"])
                     st.image(image_bytes, width=300)
-                st.markdown(message["content"])
                 
-                # Action Buttons (Edit, Delete, Retry)
+                # Handle display of complex content (like image + text)
+                if isinstance(message["content"], list):
+                    for item in message["content"]:
+                        if item["type"] == "text":
+                            st.markdown(item["text"])
+                else:
+                    st.markdown(message["content"])
+                
                 cols = st.columns([1, 1, 1, 15])
                 if message["role"] == "user":
                     if cols[0].button("✏️", key=f"edit_{i}", help="Edit Message"):
@@ -211,7 +208,6 @@ for i, message in enumerate(st.session_state.messages):
                     delete_msg(i)
                     st.rerun()
                     
-                # Retry button only for the last AI message
                 if message["role"] == "assistant" and i == len(st.session_state.messages) - 1:
                     if cols[2].button("🔄", key=f"retry_{i}", help="Regenerate Response"):
                         retry_last()
@@ -239,19 +235,32 @@ if prompt := st.chat_input("Type your complex project idea here..."):
     st.session_state.pending_generation = True
     st.rerun()
 
-# Trigger AI Generation (either from new input, edit, or retry)
 if st.session_state.pending_generation:
-    st.session_state.pending_generation = False # Reset flag immediately
+    st.session_state.pending_generation = False 
     
-    # Check if last message has image to select model
     last_msg = st.session_state.messages[-1]
     model_name = "llama-3.3-70b-versatile"
     if "image_data" in last_msg:
         model_name = "llama-3.2-11b-vision-preview"
 
     api_messages = [SYSTEM_PROMPT]
-    for msg in st.session_state.messages:
-        api_messages.append({"role": msg["role"], "content": msg["content"]})
+    
+    # --- SMART MEMORY (SLIDING WINDOW) ---
+    # Keep only the last 10 messages to prevent Token Limit Error (413)
+    recent_messages = st.session_state.messages[-10:] 
+    
+    for msg in recent_messages:
+        content = msg["content"]
+        
+        # FIX: If current model is Text-Only, but history has Image format, extract only text
+        if model_name == "llama-3.3-70b-versatile" and isinstance(content, list):
+            text_only = ""
+            for item in content:
+                if item.get("type") == "text":
+                    text_only = item.get("text", "")
+            content = text_only
+            
+        api_messages.append({"role": msg["role"], "content": content})
 
     with st.chat_message("assistant"):
         message_placeholder = st.empty()
@@ -262,7 +271,7 @@ if st.session_state.pending_generation:
                 model=model_name,
                 messages=api_messages,
                 temperature=0.7,
-                max_tokens=6000,
+                max_tokens=2048, # Reduced to fit Free Tier limits
                 stream=True,
             )
             
@@ -278,7 +287,6 @@ if st.session_state.pending_generation:
             
         except Exception as e:
             st.error(f"API Error: {e}")
-            # If error happens, allow user to retry
             if st.button("🔄 Try Again"):
                 st.session_state.pending_generation = True
                 st.rerun()
